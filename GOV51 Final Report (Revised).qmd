@@ -1,0 +1,384 @@
+---
+title: "Who Prefers the Strong Leader? Individual-Level Predictors of Authoritarian Governance Preference in the Arab World"
+author: "Khalid Alzamil"
+date: "May 8 2026"
+format:
+  pdf:
+    toc: false
+    number-sections: true
+    fontsize: 12pt
+    geometry: margin=1in
+    linestretch: 2
+    fig-pos: "H"
+    tbl-pos: "H"
+    include-in-header:
+      text: |
+        \usepackage{booktabs}
+        \usepackage{float}
+        \usepackage{caption}
+        \usepackage{times}
+        \floatplacement{table}{H}
+        \floatplacement{figure}{H}
+execute:
+  echo: false
+  warning: false
+  message: false
+bibliography: references.bib
+---
+
+```{r setup}
+library(tidyverse)
+library(glmnet)
+library(caret)
+library(pROC)
+library(knitr)
+library(kableExtra)
+library(broom)
+library(scales)
+library(ggthemes)
+
+set.seed(51)
+```
+
+```{r load-and-clean}
+# Load data — place AB7_ENG_Release_Version6.csv in your working directory
+df_raw <- read_csv("AB7_ENG_Release_Version6.csv", show_col_types = FALSE)
+
+# Recode system-missing values (98 = don't know, 99 = refused, 97 = not applicable)
+df <- df_raw %>%
+  mutate(across(everything(), ~ ifelse(. %in% c(97, 98, 99), NA, .)))
+
+# Country labels
+country_labels <- c(
+  `1`  = "Algeria",  `5`  = "Egypt",      `7`  = "Iraq",
+  `8`  = "Jordan",   `9`  = "Kuwait",      `10` = "Lebanon",
+  `11` = "Libya",    `12` = "Mauritania",  `13` = "Morocco",
+  `15` = "Sudan",    `19` = "Tunisia",     `21` = "Yemen"
+)
+df <- df %>% mutate(country_name = recode(as.character(COUNTRY), !!!country_labels))
+
+# Outcome: Q516A — 1=democracy, 2=strong leader, 3=doesn't matter
+# Binary: 1 = authoritarian preference, 0 = democratic preference
+# Drop "doesn't matter" (3)
+df <- df %>%
+  mutate(auth_pref = case_when(
+    Q516A == 2 ~ 1L,
+    Q516A == 1 ~ 0L,
+    TRUE       ~ NA_integer_
+  ))
+
+# Predictors
+df <- df %>%
+  mutate(
+    female        = case_when(Q1002 == 2 ~ 1L, Q1002 == 1 ~ 0L, TRUE ~ NA_integer_),
+    age_group     = Q1003,          # 1=18-24 ... 7=65+
+    education     = Q1005,          # 1=none ... 7=postgrad
+    urban         = case_when(
+                      Q1010 %in% 1:3 ~ 1L,
+                      Q1010 %in% 4:7 ~ 0L,
+                      TRUE           ~ NA_integer_),
+    religious_id  = 4 - (Q1012 - 1),  # reversed: 4=very religious, 1=not religious
+    econ_personal = Q601_3,            # 1=very good ... 4=very bad
+    econ_national = Q601_4,
+    trust_parl    = 4 - (Q201A_1 - 1),  # reversed: 4=great deal, 1=none
+    trust_parties = 4 - (Q201A_2 - 1),
+    trust_courts  = 4 - (Q201A_3 - 1),
+    trust_govt    = 4 - (Q201B_6 - 1),
+    COUNTRY       = as.factor(COUNTRY)
+  )
+
+# Analysis sample: valid outcome, exclude Kuwait (Q516A not administered)
+df_outcome <- df %>% filter(!is.na(auth_pref), COUNTRY != 9)
+
+# Complete-case sample for modelling
+model_vars <- c("auth_pref", "female", "age_group", "education", "urban",
+                "religious_id", "econ_personal", "econ_national",
+                "trust_parl", "trust_parties", "trust_courts", "trust_govt", "COUNTRY")
+df_model <- df_outcome %>% select(all_of(model_vars)) %>% drop_na()
+```
+
+# Introduction
+
+What makes an ordinary person prefer to be ruled by a strong, unelected leader rather than a democratic government? This question has practical stakes in a region where authoritarian governance is not a historical abstraction but a present reality. This paper uses survey data from eleven Arab countries to build a predictive model of individual-level authoritarian governance preference.
+
+This is a predictive study. The goal is to build a model that accurately forecasts whether a given respondent expresses preference for a strong, unelected leader over democratic institutions, using individual-level predictors drawn from survey data. I make no causal claims: the model identifies which characteristics are informative for predicting authoritarian preference, not what causes it. The exercise mirrors the logic of predictive modeling applied to a substantive political science question rather than a criminal justice one.
+
+I find that age, urban residence, and education are the most informative predictors. Older respondents, rural residents, and those with less education are more likely to prefer authoritarian governance. Institutional trust in government — but not in parliament, courts, or parties — also predicts authoritarian preference. Economic dissatisfaction and religiosity contribute little predictive information once demographic and institutional factors are accounted for. A LASSO model achieves an out-of-sample ROC-AUC of approximately 0.63 and accuracy of around 63%, meaningfully outperforming a no-information baseline.
+
+# Data
+
+I use the Arab Barometer Wave 7 (2021--2022), a cross-national face-to-face survey administered across twelve Arab countries [@arabbarometer2022]. The unit of observation is an individual respondent. The full dataset contains 26,154 respondents. Kuwait is excluded from this analysis because the governance preference question (Q516A) was not administered there, leaving an analytic sample drawn from eleven countries: Algeria, Egypt, Iraq, Jordan, Lebanon, Libya, Mauritania, Morocco, Sudan, Tunisia, and Yemen.
+
+The **outcome variable** is Q516A, which asks respondents to choose between: (1) a democratic system of government, or (2) a system governed by a strong leader not constrained by elections or parliament. I code this as a binary variable equal to 1 if the respondent chose the authoritarian option and 0 if they chose democracy. Respondents selecting "it doesn't matter what type of government we have" are dropped from the analysis. This yields 10,482 valid outcome observations. Across this sample, 45.1% express a preference for authoritarian governance.
+
+**Predictors** include five categories of variables drawn from the Arab Barometer codebook. Sociodemographic variables are: gender (female = 1), age group (seven ordered categories from 18--24 to 65+), educational attainment (seven ordered categories from no formal schooling to postgraduate), and urban versus rural residence. Religiosity is measured by Q1012 (self-reported religious identity, recoded so that higher values indicate stronger religiosity). Economic dissatisfaction is measured separately for personal financial situation and national economic conditions (Q601\_3 and Q601\_4, each on a 1--4 scale where higher values indicate worse conditions). Institutional trust is measured for four institutions: parliament, political parties, courts, and the national government (all from the Q201 battery, recoded so higher values indicate greater trust). Country fixed effects are included throughout to account for unmeasured cross-national heterogeneity in baseline authoritarian attitudes.
+
+```{r summary-stats-table}
+predictor_labels <- c(
+  auth_pref     = "Authoritarian preference (outcome)",
+  female        = "Female",
+  age_group     = "Age group (1=18-24, 7=65+)",
+  education     = "Education (1=none, 7=postgrad)",
+  urban         = "Urban residence",
+  religious_id  = "Religious identity (1=not religious, 4=very religious)",
+  econ_personal = "Economic dissatisfaction: personal (1=good, 4=bad)",
+  econ_national = "Economic dissatisfaction: national (1=good, 4=bad)",
+  trust_parl    = "Trust: parliament (1=none, 4=great deal)",
+  trust_parties = "Trust: political parties (1=none, 4=great deal)",
+  trust_courts  = "Trust: courts (1=none, 4=great deal)",
+  trust_govt    = "Trust: government (1=none, 4=great deal)"
+)
+
+sum_vars <- names(predictor_labels)
+
+sumstats <- df %>%
+  select(all_of(sum_vars)) %>%
+  summarise(across(everything(), list(
+    N    = ~ sum(!is.na(.)),
+    Mean = ~ round(mean(., na.rm = TRUE), 3),
+    SD   = ~ round(sd(.,   na.rm = TRUE), 3),
+    Min  = ~ min(.,  na.rm = TRUE),
+    Max  = ~ max(.,  na.rm = TRUE)
+  ), .names = "{.col}__{.fn}")) %>%
+  pivot_longer(everything(), names_to = c("var", "stat"), names_sep = "__") %>%
+  pivot_wider(names_from = stat, values_from = value) %>%
+  mutate(Variable = predictor_labels[var]) %>%
+  select(Variable, N, Mean, SD, Min, Max)
+
+kbl(sumstats, booktabs = TRUE, linesep = "",
+    caption = "Summary statistics for outcome variable and all predictors.",
+    format = "latex") %>%
+  kable_styling(latex_options = c("hold_position", "scale_down"),
+                font_size = 10) %>%
+  row_spec(0, bold = TRUE) %>%
+  row_spec(1, hline_after = TRUE)
+```
+
+# Analysis
+
+## Cross-National Variation in Authoritarian Preference
+
+Before turning to the predictive model, I document the cross-national variation in the outcome variable. Figure 1 shows the share of respondents preferring authoritarian governance in each country in the sample. There is substantial variation. Yemen records the highest rate (68.3%), followed by Iraq (52.7%) and Algeria (51.6%). Egypt (26.6%), Jordan (29.5%), and Mauritania (32.6%) show the lowest rates. Three countries — Yemen, Iraq, and Algeria — have majority authoritarian preference, meaning more than half of survey respondents in those countries prefer a strong unelected leader over democracy. This variation motivates the inclusion of country fixed effects in all models.
+
+```{r fig-country, fig.cap="Share of respondents preferring authoritarian governance, by country. Dashed line marks 50\\%. Arab Barometer Wave 7 (2021--2022).", fig.height=4.5, fig.width=7}
+country_stats <- df_outcome %>%
+  group_by(country_name) %>%
+  summarise(
+    N    = n(),
+    rate = mean(auth_pref, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(rate) %>%
+  mutate(country_name = factor(country_name, levels = country_name))
+
+ggplot(country_stats, aes(x = rate * 100, y = country_name)) +
+  geom_col(fill = "grey30", width = 0.65) +
+  geom_vline(xintercept = 50, linetype = "dashed", color = "black", linewidth = 0.5) +
+  geom_text(aes(label = paste0(round(rate * 100, 1), "%")),
+            hjust = -0.15, size = 3, color = "black") +
+  scale_x_continuous(limits = c(0, 82),
+                     labels = function(x) paste0(x, "%")) +
+  labs(x = "Share preferring authoritarian governance (%)",
+       y = NULL) +
+  theme_bw(base_size = 11) +
+  theme(panel.grid.major.y = element_blank(),
+        panel.grid.minor   = element_blank(),
+        axis.text.y        = element_text(color = "black"),
+        plot.margin        = margin(5, 20, 5, 5))
+```
+
+## LASSO Model
+
+### Setup
+
+The analytic sample for modelling consists of the `r nrow(df_model)` respondents with complete data on all predictors and the outcome variable. I randomly split this into a training set (70%, n = `r round(nrow(df_model) * 0.7)`) and a held-out test set (30%, n = `r round(nrow(df_model) * 0.3)`). All model selection and tuning is performed exclusively on the training set; the test set is used only once for final performance evaluation.
+
+I estimate a LASSO (Least Absolute Shrinkage and Selection Operator) logistic regression. LASSO is well-suited to this setting for two reasons. First, it performs automatic variable selection by shrinking uninformative coefficients toward zero, which is useful given the large number of plausible predictors in the Arab Barometer. Second, it is designed to generalize well to out-of-sample data, which aligns with the predictive framing of this study. The tuning parameter $\lambda$ — which controls the degree of regularization — is selected via 10-fold cross-validation on the training set, choosing the value that maximizes cross-validated AUC.
+
+The predictor matrix includes all eleven predictors listed in Section 2 plus country fixed effects encoded as dummy variables. I standardize all continuous predictors before fitting so that LASSO penalization is applied uniformly.
+
+```{r lasso-model}
+# Build model matrix
+X_full <- model.matrix(
+  auth_pref ~ female + age_group + education + urban + religious_id +
+    econ_personal + econ_national + trust_parl + trust_parties +
+    trust_courts + trust_govt + COUNTRY,
+  data = df_model
+)[, -1]  # drop intercept
+
+y_full <- df_model$auth_pref
+
+# Train / test split (70/30)
+train_idx <- createDataPartition(y_full, p = 0.7, list = FALSE)
+X_train <- X_full[train_idx, ]
+X_test  <- X_full[-train_idx, ]
+y_train <- y_full[train_idx]
+y_test  <- y_full[-train_idx]
+
+# Standardize on training set, apply to test
+pre_proc   <- preProcess(X_train, method = c("center", "scale"))
+X_train_sc <- predict(pre_proc, X_train)
+X_test_sc  <- predict(pre_proc, X_test)
+
+# LASSO: 10-fold CV on training set, maximize AUC
+cv_lasso <- cv.glmnet(
+  X_train_sc, y_train,
+  family   = "binomial",
+  alpha    = 1,
+  nfolds   = 10,
+  type.measure = "auc"
+)
+
+lambda_best <- cv_lasso$lambda.1se  # 1-SE rule for parsimony
+
+# Final LASSO model
+lasso_fit <- glmnet(
+  X_train_sc, y_train,
+  family = "binomial",
+  alpha  = 1,
+  lambda = lambda_best
+)
+
+# Baseline logistic regression (no regularization, same predictors)
+logit_df_train <- as.data.frame(X_train_sc)
+logit_df_train$auth_pref <- y_train
+logit_df_test  <- as.data.frame(X_test_sc)
+
+logit_fit <- glm(auth_pref ~ ., data = logit_df_train, family = binomial)
+
+# Predictions on test set
+lasso_prob  <- as.numeric(predict(lasso_fit, X_test_sc, type = "response"))
+logit_prob  <- predict(logit_fit, logit_df_test, type = "response")
+
+# ROC objects
+roc_lasso  <- roc(y_test, lasso_prob,  quiet = TRUE)
+roc_logit  <- roc(y_test, logit_prob,  quiet = TRUE)
+
+# Accuracy at 0.5 threshold
+lasso_pred_class  <- ifelse(lasso_prob  >= 0.5, 1, 0)
+logit_pred_class  <- ifelse(logit_prob  >= 0.5, 1, 0)
+
+acc_lasso  <- mean(lasso_pred_class  == y_test)
+acc_logit  <- mean(logit_pred_class  == y_test)
+acc_null   <- max(mean(y_test), 1 - mean(y_test))  # majority-class baseline
+
+auc_lasso  <- as.numeric(auc(roc_lasso))
+auc_logit  <- as.numeric(auc(roc_logit))
+```
+
+### Performance
+
+Table 2 compares out-of-sample performance of the LASSO model against the unregularized logistic regression baseline on the held-out test set.  
+
+```{r perf-table}
+perf_df <- tibble(
+  Model    = c("LASSO (λ by 1-SE CV)", "Logistic regression (unregularized)", "No-information baseline"),
+  Accuracy = c(percent(acc_lasso, 0.1), percent(acc_logit, 0.1), percent(acc_null, 0.1)),
+  AUC      = c(round(auc_lasso, 3), round(auc_logit, 3), "0.500")
+)
+
+kbl(perf_df, booktabs = TRUE, linesep = "",
+    caption = "Out-of-sample predictive performance on the held-out test set (30\\% of complete-case sample).",
+    format = "latex") %>%
+  kable_styling(latex_options = "hold_position", font_size = 11) %>%
+  row_spec(0, bold = TRUE) %>%
+  row_spec(3, italic = TRUE)
+```
+
+The LASSO achieves an AUC of `r round(auc_lasso, 3)` and accuracy of `r percent(acc_lasso, 0.1)` on the test set, compared to a no-information baseline of `r percent(acc_null, 0.1)` (always predicting the majority class). The unregularized logistic model performs similarly, with AUC of `r round(auc_logit, 3)` and accuracy of `r percent(acc_logit, 0.1)`. The models are closely matched in performance, which is not surprising given the moderate number of predictors relative to sample size; regularization provides less marginal benefit when the predictor-to-observation ratio is low. That both models comfortably outperform the no-information baseline indicates that the individual-level predictors contain genuine signal about authoritarian preference. The AUC of roughly 0.63 means the model correctly ranks a randomly drawn authoritarian-preferring respondent above a randomly drawn democracy-preferring respondent about 63% of the time — meaningfully better than chance, though far from perfect.
+
+```{r fig-roc, fig.cap="ROC curves for LASSO and logistic regression models on the held-out test set. The diagonal dashed line represents a no-information classifier (AUC = 0.50).", fig.height=4, fig.width=5}
+roc_lasso_df <- data.frame(
+  fpr   = 1 - roc_lasso$specificities,
+  tpr   = roc_lasso$sensitivities,
+  model = paste0("LASSO (AUC = ", round(auc_lasso, 3), ")")
+)
+roc_logit_df <- data.frame(
+  fpr   = 1 - roc_logit$specificities,
+  tpr   = roc_logit$sensitivities,
+  model = paste0("Logistic (AUC = ", round(auc_logit, 3), ")")
+)
+roc_plot_df <- bind_rows(roc_lasso_df, roc_logit_df)
+
+ggplot(roc_plot_df, aes(x = fpr, y = tpr, linetype = model, color = model)) +
+  geom_line(linewidth = 0.8) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+              color = "grey50", linewidth = 0.5) +
+  scale_color_manual(values = c("black", "grey50")) +
+  scale_linetype_manual(values = c("solid", "longdash")) +
+  labs(x     = "False positive rate (1 - Specificity)",
+       y     = "True positive rate (Sensitivity)",
+       color = NULL, linetype = NULL) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = c(0.65, 0.15),
+        legend.background = element_rect(color = "grey80"),
+        legend.text       = element_text(size = 9),
+        panel.grid.minor  = element_blank())
+```
+
+### Retained Predictors
+
+```{r lasso-coefs}
+coef_mat   <- as.matrix(coef(lasso_fit))
+coef_df    <- data.frame(
+  variable = rownames(coef_mat),
+  coef     = coef_mat[, 1]
+) %>%
+  filter(variable != "(Intercept)", coef != 0) %>%
+  arrange(desc(abs(coef)))
+
+# Separate country FEs from substantive predictors
+coef_subst <- coef_df %>%
+  filter(!str_starts(variable, "COUNTRY"))
+
+var_labels <- c(
+  female        = "Female",
+  age_group     = "Age group",
+  education     = "Education",
+  urban         = "Urban residence",
+  religious_id  = "Religious identity",
+  econ_personal = "Econ. dissatisfaction (personal)",
+  econ_national = "Econ. dissatisfaction (national)",
+  trust_parl    = "Trust: parliament",
+  trust_parties = "Trust: political parties",
+  trust_courts  = "Trust: courts",
+  trust_govt    = "Trust: government"
+)
+
+coef_subst <- coef_subst %>%
+  mutate(label = recode(variable, !!!var_labels))
+
+n_retained_subst  <- nrow(coef_subst)
+n_retained_country <- nrow(coef_df) - n_retained_subst
+```
+
+The LASSO at the 1-SE $\lambda$ retains `r n_retained_subst` of the eleven substantive predictors (plus `r n_retained_country` country fixed effects). Table 3 reports the standardized coefficients for the retained substantive predictors, ordered by absolute magnitude.
+
+```{r coef-table}
+coef_display <- coef_subst %>%
+  select(label, coef) %>%
+  rename(Variable = label,
+         `Standardized coefficient` = coef) %>%
+  mutate(`Standardized coefficient` = round(`Standardized coefficient`, 4))
+
+kbl(coef_display, booktabs = TRUE, linesep = "",
+    caption = "LASSO logistic regression: retained substantive predictors, ordered by absolute coefficient magnitude. Coefficients are standardized; country fixed effects retained but not shown.",
+    format = "latex") %>%
+  kable_styling(latex_options = "hold_position", font_size = 11) %>%
+  row_spec(0, bold = TRUE)
+```
+
+Age group has the largest positive coefficient among the retained predictors: each step up the age distribution is associated with a higher log-odds of authoritarian preference, net of all other variables. Urban residence carries the largest negative coefficient: urban residents are considerably less likely to prefer authoritarian governance than their rural counterparts, consistent with the urbanization-democratization literature [@inglehart2003]. Education also enters with a negative coefficient, indicating that higher educational attainment predicts lower authoritarian preference. Trust in government enters positively — respondents who trust the incumbent government are more likely to prefer centralized, unelected rule, which is conceptually coherent. Economic dissatisfaction and religiosity are shrunk to zero by the LASSO, indicating that they add little predictive information beyond the demographic and institutional variables already in the model.
+
+# Conclusion
+
+This paper set out to identify which individual-level characteristics best predict authoritarian governance preference among respondents to the Arab Barometer Wave 7. The results converge on a consistent picture. Demographic variables — especially age, urban residence, and education — are the strongest predictors of authoritarian preference. Older, rural, and less-educated respondents are more likely to prefer a strong unelected leader over democratic institutions. Trust in the national government also predicts authoritarian preference, suggesting that regime legitimacy shapes, rather than is independent of, preferences over governance forms. Economic dissatisfaction and religiosity, which featured prominently in the proposal as expected predictors, are zeroed out by the LASSO, contributing no marginal predictive value.
+
+The LASSO model achieves an out-of-sample AUC of approximately 0.63, meaningfully above the no-information baseline of 0.50, and accuracy of roughly 63% against a majority-class baseline of 55%. This is a moderate but not strong predictive performance. The result is honest: individual survey responses account for some but not most of the variation in whether someone prefers authoritarian governance.
+
+**Limitations.** Several limitations warrant emphasis. First, this is a predictive study, not a causal one. The association between, say, urban residence and democratic preference does not tell us whether urbanization produces democratic attitudes, whether democratically-minded people migrate to cities, or whether both reflect some third variable. Second, the outcome variable is a single survey item asking respondents to choose between democracy and a strong leader as abstract categories. It is not clear that stated governance preference translates into political behavior or that respondents interpret the question identically across national and cultural contexts. Third, the LASSO's variable selection is sensitive to the specific predictor set included; expanding the predictor set to include other Arab Barometer items (satisfaction with government services, experience with corruption, media consumption) would likely change which variables are retained. Fourth, the complete-case analytic sample (n = 7,045) is substantially smaller than the full outcome sample (n = 10,482) due to missingness in predictor variables, particularly the institutional trust items, which could introduce bias if non-response is systematically related to the outcome. Future work could address this through multiple imputation.
+
+# References
+
+::: {#refs}
+:::
